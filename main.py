@@ -1,85 +1,79 @@
-import time, os
+import json
+import requests
+import time
+import os
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-D2L_INDEX = int(os.getenv("D2L_INDEX"))
-MS_EMAIL = os.getenv("MS_EMAIL")
-MS_PASSWORD = os.getenv("MS_PASSWORD")
+COOKIES_FILE = "cookies.json"
+REFRESH_INTERVAL = 60 * 30
 
-if os.path.exists("ms_state.json"):
-    pass
-else:
-    with open("ms_state.json", "w") as f:
-        f.write("{}")
+def grabCookies():
+    MS_EMAIL = os.getenv("MS_EMAIL")
+    MS_PASSWORD = os.getenv("MS_PASSWORD")
 
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(storage_state="ms_state.json")
-    page = context.new_page()
-
-    page.goto("https://nbvhs-nbed.brightspace.com/d2l/le/enhancedSequenceViewer/98982?url=https%3A%2F%2F98cafd8c-1774-45e7-b43c-b19bfcb13758.sequences.api.brightspace.com%2F98982%2Factivity%2F3310909%3FfilterOnDatesAndDepth%3D1")
-
-    def getPageTitle():
-        try:
-            return page.title()
-        except:
-            return ""
-
-    def openVladThread():
-        page.goto("https://nbvhs-nbed.brightspace.com/d2l/le/enhancedSequenceViewer/98982?url=https%3A%2F%2F98cafd8c-1774-45e7-b43c-b19bfcb13758.sequences.api.brightspace.com%2F98982%2Factivity%2F3310909%3FfilterOnDatesAndDepth%3D1")
-        page.wait_for_load_state("domcontentloaded")
-
-        for _ in range(10):
-            frame = page.frame(url=lambda url: "fullscreen/3310909/View" in url)
-            if frame:
-                break
-            time.sleep(1)
-        else:
-            raise Exception("Frame not found!")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
 
         try:
-            frame.wait_for_function("() => window.D2L && typeof D2L.O === 'function'", timeout=10000)
-            frame.evaluate(f'D2L.O("__g1", {D2L_INDEX})()')
-        except Exception as e:
-            print(f"Failed to run D2L.O: {e}")
-            time.sleep(10)
+            page.goto("https://nbvhs-nbed.brightspace.com/d2l/lp/auth/saml/login?...")
 
-    def handleMicrosoftLogin():
-        # Fill Email input
-        page.wait_for_selector("#i0116")
-        page.fill("#i0116", MS_EMAIL)
-        page.click("#idSIButton9")
-
-        # Fill Password input
-        page.wait_for_selector("#i0118")
-        page.fill("#i0118", MS_PASSWORD)
-        page.click("#idSIButton9")
-
-        # Handle "Stay signed in?" prompt
-        try:
-            page.wait_for_selector("#idSIButton9", timeout=5000)
+            page.wait_for_selector("#i0116", timeout=20000)
+            page.fill("#i0116", MS_EMAIL)
             page.click("#idSIButton9")
-        except:
-            pass
 
-    try:
-        while True:
-            pageTitle = getPageTitle()
+            page.wait_for_selector("#i0118", timeout=20000)
+            page.fill("#i0118", MS_PASSWORD)
+            page.click("#idSIButton9")
 
-            if pageTitle == "Introduce Yourself":
-                openVladThread()
-                time.sleep(1)
-            elif pageTitle == "New Brunswick Virtual Learning Centre":
-                page.goto("https://nbvhs-nbed.brightspace.com/d2l/lp/auth/saml/login?target=%2Fd2l%2Fle%2FenhancedSequenceViewer%2F98982%3Furl%3Dhttps%253a%252f%252f98cafd8c-1774-45e7-b43c-b19bfcb13758.sequences.api.brightspace.com%252f98982%252factivity%252f3310909%253ffilterOnDatesAndDepth%253d1")
-                if getPageTitle() == "Sign in to your account":
-                    handleMicrosoftLogin()
-                    context.storage_state(path="ms_state.json")
-                else:
-                    time.sleep(5)
-                    pass
-            else:
-                time.sleep(5)
+            try:
+                page.wait_for_selector("#idSIButton9", timeout=5000)
+                page.click("#idSIButton9")
+            except:
                 pass
 
-    except KeyboardInterrupt:
-        browser.close()
+            page.wait_for_load_state("domcontentloaded")
+            time.sleep(5)
+
+            cookies = {c["name"]: c["value"] for c in context.cookies()}
+            with open(COOKIES_FILE, "w") as f:
+                json.dump({"cookies": cookies}, f, indent=2)
+
+            print("[ ✓ ] Successfully refreshed cookies.")
+            return cookies
+
+        finally:
+            browser.close()
+
+def loadCookies():
+    if Path(COOKIES_FILE).exists():
+        with open(COOKIES_FILE, "r") as f:
+            return json.load(f).get("cookies", {})
+    return {}
+
+cookies = loadCookies()
+last_refresh = 0
+
+url = "https://nbvhs-nbed.brightspace.com/d2l/le/98982/discussions/threads/448574/ViewPartial?inContentTool=true&_d2l_prc%24headingLevel=2&_d2l_prc%24scope=&_d2l_prc%24hasActiveForm=false&isXhr=true&requestId=4"
+headers = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Referer": "https://nbvhs-nbed.brightspace.com/"
+}
+
+while True:
+    if time.time() - last_refresh > REFRESH_INTERVAL or not cookies:
+        print("[ ⟳ ] Refreshing cookies...")
+        cookies = grabCookies()
+        last_refresh = time.time()
+
+    resp = requests.get(url, headers=headers, cookies=cookies)
+    raw = resp.text
+    if raw.startswith("while(1);"):
+        raw = raw[len("while(1);"):]
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print("[ ✗ ] Failed to decode JSON, response:", raw)
